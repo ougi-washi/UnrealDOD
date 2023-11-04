@@ -16,6 +16,11 @@ int32 FUDSimulationState::RegisterActor(AActor* Actor)
 		return -1;
 	}
 
+	if (!Actor->ActorHasTag(UD_DOD_TAG))
+	{
+		Actor->Tags.Add(UD_DOD_TAG);
+	}
+
 	FUDLocation Location = {};
 	Location.Value = Actor->GetActorLocation();
 	const int32 PosIndex = Locations.Add(Location);
@@ -125,6 +130,11 @@ void FUDSimulation::Start(UWorld* InWorld)
 	}
 }
 
+void FUDSimulation::Stop()
+{
+	bIsRunning = false;
+}
+
 void FUDSimulation::ReplicateIndex(const int32& Index, const bool& bSkipSource)
 {
 	
@@ -162,8 +172,4 @@ uint32 FUDSimulation::Run()
 		});
 	}
 	return 0;
-}
-
-void FUDSimulation::Stop()
-{
 }

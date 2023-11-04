@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 
+#define UD_DOD_TAG "DOD"
+
 struct UNREALDOD_API FUDLocation
 {
 	FVector Value = FVector::ZeroVector;
@@ -55,6 +57,11 @@ public:
 	virtual ~FUDSimulation() override;
 
 	void Start(UWorld* InWorld);
+	void Stop() override;
+
+	FORCEINLINE int32 RegisterActor(AActor* Actor) { return State.RegisterActor(Actor); };
+	FORCEINLINE void UnregisterActor(const int32& Index) { return State.UnregisterActor(Index); };
+
 	void ReplicateIndex(const int32& Index, const bool& bSkipSource);
 	TArray<int32> GetDifferences(const FUDSimulationState& ClientState, const float& ErrorTolerence); // Returns the list of indices that have to be corrected
 
@@ -62,7 +69,6 @@ protected:
 
 	bool Init() override;
 	uint32 Run() override;
-	void Stop() override;
 
 private:
 
