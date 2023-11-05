@@ -242,11 +242,11 @@ uint32 FUDSimulation::Run()
 			if (CurrentQueue.DoneExecuting()) // Refresh if possible
 			{
 				CurrentQueue.Clear();
-				EnqueueCommandToGameThread(CurrentQueue, FMath::RandHelper(3),
+				EnqueueCommandToGameThread(CurrentQueue, FMath::RandHelper(10),
 					[&, TempDelta = DeltaSeconds, TempIndexToUpdate = IndexToUpdate]()
 					{
 						State.UpdateActorLocation(TempIndexToUpdate, TempDelta);
-						State.UpdateActorRotation(TempIndexToUpdate, TempDelta);
+						//State.UpdateActorRotation(TempIndexToUpdate, TempDelta);
 					});
 				CurrentQueue.WaitForExecution();
 			}
