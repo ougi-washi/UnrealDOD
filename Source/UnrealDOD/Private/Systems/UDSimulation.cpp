@@ -5,14 +5,17 @@
 #include "Kismet/GameplayStatics.h"
 #include "HAL/PlatformProcess.h"
 
-#define MAX_QUEUE_SIZE 5000
+#define MAX_QUEUE_SIZE 50000
+#define MAX_COMMANDS_PER_FRAME 5
 
 int32 FUDSimulationState::RegisterActor(AActor* Actor)
 {
 	check(Actor);
 
-	const int32 AddedIndex = ActorPtrs.AddUnique(Actor);
-	if (!ActorPtrs.IsValidIndex(AddedIndex))
+	FUDActor ActorObj = {};
+	ActorObj.Ptr = Actor;
+	const int32 AddedIndex = Actors.AddUnique(ActorObj);
+	if (!Actors.IsValidIndex(AddedIndex))
 	{
 		return -1;
 	}
@@ -50,14 +53,20 @@ void FUDSimulationState::UnregisterActor(const int32& Index)
 	Locations.RemoveAt(Index, 1, true);
 	Rotations.RemoveAt(Index, 1, true);
 	Inputs.RemoveAt(Index, 1, true);
-	ActorPtrs.RemoveAt(Index, 1, true);
+	Actors.RemoveAt(Index, 1, true);
+}
+
+FUDSimulationQueue& FUDSimulationState::GetActorMovementQueue(const int32& Index)
+{
+	check(Actors.IsValidIndex(Index) && Actors[Index]);
+	return Actors[Index].MovementQueue;
 }
 
 TArray<int32> FUDSimulationState::UpdateLocations(const float& Delta)
 {
 	TArray<int32> ActorsToUpdate = {}; // This allows us to avoid updating actors that do not change
 
-	for (int32 i = 0; i < ActorPtrs.Num(); i++)
+	for (int32 i = 0; i < Actors.Num(); i++)
 	{
 		FUDLocation& Location = Locations[i];
 		FUDMovement& Movement = Movements[i];
@@ -93,7 +102,7 @@ TArray<int32> FUDSimulationState::UpdateRotations(const float& Delta)
 {
 	TArray<int32> ActorsToUpdate = {}; // This allows us to avoid updating actors that do not change
 
-	for (int32 i = 0; i < ActorPtrs.Num(); i++)
+	for (int32 i = 0; i < Actors.Num(); i++)
 	{
 		FUDRotation& Rotation = Rotations[i];
 		FUDMovementInput& Input = Inputs[i];
@@ -110,48 +119,63 @@ TArray<int32> FUDSimulationState::UpdateRotations(const float& Delta)
 	return ActorsToUpdate;
 }
 
-void FUDSimulationState::UpdateActorsLocations(const TArray<int32> Indices, const float& Delta)
+void FUDSimulationState::UpdateActorLocation(const int32& Index, const float& Delta)
+{
+	check(Actors.IsValidIndex(Index) && Actors[Index]);
+	Actors[Index]->SetActorLocation(Locations[Index].Value);
+}
+
+void FUDSimulationState::UpdateActorRotation(const int32& Index, const float& Delta)
+{
+	check(Actors.IsValidIndex(Index) && Actors[Index]);
+	Actors[Index]->SetActorRotation(Rotations[Index].Value);
+}
+
+void FUDSimulationState::UpdateActorsLocations(const TArray<int32>& Indices, const float& Delta)
 {
 	for (const int32& Index : Indices)
 	{
-		ActorPtrs[Index]->SetActorLocation(Locations[Index].Value);
+		UpdateActorLocation(Index, Delta);
 	}
 }
 
-void FUDSimulationState::UpdateActorsRotations(const TArray<int32> Indices, const float& Delta)
+void FUDSimulationState::UpdateActorsRotations(const TArray<int32>& Indices, const float& Delta)
 {
 	for (const int32& Index : Indices)
 	{
-		ActorPtrs[Index]->SetActorRotation(Rotations[Index].Value);
+		UpdateActorRotation(Index, Delta);
 	}
 }
 
 void FUDSimulationQueue::ExecuteCommands()
 {
-	uint16 CurrentQueueIndex = MAX_QUEUE_SIZE;
-
-	while (Queue.Num() > 0)
+	if (DoneExecuting())
 	{
-		if (Queue[0].Lambda)
-		{
-			Queue[0].Lambda();
-		}
-		Queue.RemoveAt(0, 0, true);
-
-		// Avoid infinite loop
-		CurrentQueueIndex--;
-		if (CurrentQueueIndex <= 0)
-		{
-			return;
-		}
+		return;
 	}
+
+	uint16 CurrentCommandIndex = 0;
+
+	while (CurrentCommandIndex < Commands.Num() && CurrentCommandIndex < MAX_COMMANDS_PER_FRAME)
+	{
+		const bool bIsExecutionFrame = UKismetSystemLibrary::GetFrameCount() - Commands[CurrentCommandIndex].EnqueuedFrame >= Commands[CurrentCommandIndex].FrameDelay;
+		if (Commands[CurrentCommandIndex].Lambda && bIsExecutionFrame)
+		{
+			Commands[CurrentCommandIndex].Lambda();
+		}
+		CurrentCommandIndex++;
+	}
+
+	FinishExecution();
 }
 
-void FUDSimulationQueue::Enqueue(TFunction<void(void)> LambdaToExec)
+void FUDSimulationQueue::Enqueue(const FUDSimulationCommand& Command)
 {
-	if (Queue.Num() < MAX_QUEUE_SIZE)
+	if (Commands.Num() < MAX_QUEUE_SIZE && !IsLocked())
 	{
-		Queue.Add({ LambdaToExec });
+		Lock();
+		Commands.Insert(Command, Commands.Num());
+		Unlock();
 	}
 	else
 	{
@@ -159,7 +183,15 @@ void FUDSimulationQueue::Enqueue(TFunction<void(void)> LambdaToExec)
 	}
 }
 
+void FUDSimulationQueue::Clear()
+{
+	Lock();
+	Commands.Empty();
+	Unlock();
+}
+
 FUDSimulation::FUDSimulation(UWorld* InWorld)
+	: FUDSimulation()
 {
 	if (InWorld)
 	{
@@ -177,33 +209,6 @@ FUDSimulation::~FUDSimulation()
 		delete CurrentThread;
 	}
 }
-
-void FUDSimulation::Tick_GameThread(const float& Delta)
-{
-	check(IsInGameThread());
-	Queue.ExecuteCommands();
-}
-
-void FUDSimulation::Stop()
-{
-	bIsRunning = false;
-}
-
-void FUDSimulation::ReplicateIndex(const int32& Index, const bool& bSkipSource)
-{
-	
-}
-
-TArray<int32> FUDSimulation::GetDifferences(const FUDSimulationState& ClientState, const float& ErrorTolerence)
-{
-	return TArray<int32>();
-}
-
-void FUDSimulation::EnqueueCommandToGameThread(TFunction<void(void)> LambdaToAdd)
-{
-	Queue.Enqueue(LambdaToAdd);
-}
-
 bool FUDSimulation::Init()
 {
 	return true;
@@ -216,29 +221,84 @@ uint32 FUDSimulation::Run()
 		UE_LOG(LogTemp, Warning, TEXT("Cannot run simulation with an invalid world, please set world"));
 	}
 
+	double PreviousFrameTime = FPlatformTime::Seconds();
 	while (bIsRunning)
 	{
 		check(World);
-		const float DeltaSeconds = UGameplayStatics::GetWorldDeltaSeconds(World);
 
-		const TArray<int32> LocationIndices =  State.UpdateLocations(DeltaSeconds);
+		const double CurrentTime = FPlatformTime::Seconds();
+		const double DeltaSeconds = CurrentTime - PreviousFrameTime;
+		PreviousFrameTime = CurrentTime;
+
+		const TArray<int32> LocationIndices = State.UpdateLocations(DeltaSeconds);
 		const TArray<int32> RotationIndices = State.UpdateRotations(DeltaSeconds);
-
-		EnqueueCommandToGameThread([&, TempDelta = DeltaSeconds, TempLocationIndices = LocationIndices, TempRotationIndices = RotationIndices]()
+		TArray<int32> IndicesToUpdate = LocationIndices;
+		IndicesToUpdate.Append(RotationIndices);
+		
+		for (const int32& IndexToUpdate : LocationIndices)
 		{
-			State.UpdateActorsLocations(TempLocationIndices, TempDelta);
-			State.UpdateActorsRotations(TempRotationIndices, TempDelta);
-		});
+			FUDSimulationQueue& CurrentQueue = State.GetActorMovementQueue(IndexToUpdate);
 
-		// Wait to the next frame time
-		FPlatformProcess::Sleep(1.f / FramePerSecond);
+			if (CurrentQueue.DoneExecuting()) // Refresh if possible
+			{
+				CurrentQueue.Clear();
+				EnqueueCommandToGameThread(CurrentQueue, FMath::RandHelper(3),
+					[&, TempDelta = DeltaSeconds, TempIndexToUpdate = IndexToUpdate]()
+					{
+						State.UpdateActorLocation(TempIndexToUpdate, TempDelta);
+						State.UpdateActorRotation(TempIndexToUpdate, TempDelta);
+					});
+				CurrentQueue.WaitForExecution();
+			}
+		}
 
-		//FPlatformProcess::ConditionalSleep([TempWorld = World, TempFps = FramePerSecond]() 
-		//{
-		//	check(TempWorld);
-		//	return UGameplayStatics::GetWorldDeltaSeconds(TempWorld) >= 1 / TempFps;
-		//});
+		// Maintain a consistent frame rate
+		const double FrameTime = 1.0 / FramePerSecond;
+		const double SleepTime = FrameTime - DeltaSeconds;
+		if (SleepTime > 0.0)
+		{
+			FPlatformProcess::Sleep(SleepTime);
+		}
 	}
 
 	return 0;
+}
+
+void FUDSimulation::Stop()
+{
+	bIsRunning = false;
+}
+
+void FUDSimulation::Tick_GameThread(const float& Delta)
+{
+	check(IsInGameThread());
+	GeneralQueue.ExecuteCommands();
+	for (int32 i = 0 ; i < State.Actors.Num(); i++)
+	{
+		State.GetActorMovementQueue(i).ExecuteCommands();
+	}
+}
+
+void FUDSimulation::ReplicateIndex(const int32& Index, const bool& bSkipSource)
+{
+	
+}
+
+TArray<int32> FUDSimulation::GetDifferences(const FUDSimulationState& ClientState, const float& ErrorTolerence)
+{
+	return TArray<int32>();
+}
+
+void FUDSimulation::EnqueueCommandToGameThread(FUDSimulationQueue& Queue, const int64 FrameDelay, TFunction<void(void)> LambdaToAdd)
+{
+	FUDSimulationCommand Command = {};
+	Command.Lambda = LambdaToAdd;
+	Command.EnqueuedFrame = UKismetSystemLibrary::GetFrameCount();
+	Command.FrameDelay = FrameDelay;
+	Queue.Enqueue(Command);
+}
+
+void FUDSimulation::EnqueueGeneralCommandToGameThread(TFunction<void(void)> LambdaToAdd)
+{
+	EnqueueCommandToGameThread(GeneralQueue, 0, LambdaToAdd);
 }
