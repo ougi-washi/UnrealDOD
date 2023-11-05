@@ -5,6 +5,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "HAL/PlatformProcess.h"
 
+#define MAX_QUEUE_SIZE 5000
 
 int32 FUDSimulationState::RegisterActor(AActor* Actor)
 {
@@ -26,6 +27,15 @@ int32 FUDSimulationState::RegisterActor(AActor* Actor)
 	const int32 PosIndex = Locations.Add(Location);
 	ensureMsgf(PosIndex == AddedIndex, TEXT("FUDSimulationState::RegisterActor - Cannot add position properly because the indices seem to unmatch with the actor pointer."));
 
+	FUDMovement Movement = {};
+	const int32 MovIndex = Movements.Add(Movement);
+	ensureMsgf(MovIndex == AddedIndex, TEXT("FUDSimulationState::RegisterActor - Cannot add Movement properly because the indices seem to unmatch with the actor pointer."));
+
+	FUDMovementInput Input = {};
+	Input.Movement = FVector(1.f, 0.f, 0.f);
+	const int32 InpIndex = Inputs.Add(Input);
+	ensureMsgf(InpIndex == AddedIndex, TEXT("FUDSimulationState::RegisterActor - Cannot add Input properly because the indices seem to unmatch with the actor pointer."));
+
 	FUDRotation Rotation = {};
 	Rotation.Value = Actor->GetActorRotation();
 	const int32 RotIndex = Rotations.Add(Rotation);
@@ -43,11 +53,11 @@ void FUDSimulationState::UnregisterActor(const int32& Index)
 	ActorPtrs.RemoveAt(Index, 1, true);
 }
 
-void FUDSimulationState::UpdateLocations(const float& Delta)
+TArray<int32> FUDSimulationState::UpdateLocations(const float& Delta)
 {
 	TArray<int32> ActorsToUpdate = {}; // This allows us to avoid updating actors that do not change
 
-	for (int32 i = 0 ; i < ActorPtrs.Num() ; i++)
+	for (int32 i = 0; i < ActorPtrs.Num(); i++)
 	{
 		FUDLocation& Location = Locations[i];
 		FUDMovement& Movement = Movements[i];
@@ -56,7 +66,7 @@ void FUDSimulationState::UpdateLocations(const float& Delta)
 
 		FVector Acceleration = FVector::ZeroVector;
 
-		Acceleration += Location.Input * Movement.Acceleration;
+		Acceleration += Input.Movement * Movement.Acceleration;
 
 		if (Movement.Deceleration > 0.0f)
 		{
@@ -76,13 +86,10 @@ void FUDSimulationState::UpdateLocations(const float& Delta)
 		}
 	}
 
-	for (const int32& ActorToUpdate : ActorsToUpdate)
-	{
-		ActorPtrs[ActorToUpdate]->SetActorLocation(Locations[ActorToUpdate].Value);
-	}
+	return ActorsToUpdate;
 }
 
-void FUDSimulationState::UpdateRotations(const float& Delta)
+TArray<int32> FUDSimulationState::UpdateRotations(const float& Delta)
 {
 	TArray<int32> ActorsToUpdate = {}; // This allows us to avoid updating actors that do not change
 
@@ -100,16 +107,66 @@ void FUDSimulationState::UpdateRotations(const float& Delta)
 		}
 	}
 
-	for (const int32& ActorToUpdate : ActorsToUpdate)
+	return ActorsToUpdate;
+}
+
+void FUDSimulationState::UpdateActorsLocations(const TArray<int32> Indices, const float& Delta)
+{
+	for (const int32& Index : Indices)
 	{
-		ActorPtrs[ActorToUpdate]->SetActorRotation(Rotations[ActorToUpdate].Value);
+		ActorPtrs[Index]->SetActorLocation(Locations[Index].Value);
 	}
 }
 
-FUDSimulation::FUDSimulation()
+void FUDSimulationState::UpdateActorsRotations(const TArray<int32> Indices, const float& Delta)
 {
-	bIsRunning = false;
-	CurrentThread = FRunnableThread::Create(this, TEXT("Unreal DOD Simulation"));
+	for (const int32& Index : Indices)
+	{
+		ActorPtrs[Index]->SetActorRotation(Rotations[Index].Value);
+	}
+}
+
+void FUDSimulationQueue::ExecuteCommands()
+{
+	uint16 CurrentQueueIndex = MAX_QUEUE_SIZE;
+
+	while (Queue.Num() > 0)
+	{
+		if (Queue[0].Lambda)
+		{
+			Queue[0].Lambda();
+		}
+		Queue.RemoveAt(0, 0, true);
+
+		// Avoid infinite loop
+		CurrentQueueIndex--;
+		if (CurrentQueueIndex <= 0)
+		{
+			return;
+		}
+	}
+}
+
+void FUDSimulationQueue::Enqueue(TFunction<void(void)> LambdaToExec)
+{
+	if (Queue.Num() < MAX_QUEUE_SIZE)
+	{
+		Queue.Add({ LambdaToExec });
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("FUDSimulationQueue::Enqueue - Reached max queue size"));
+	}
+}
+
+FUDSimulation::FUDSimulation(UWorld* InWorld)
+{
+	if (InWorld)
+	{
+		World = InWorld;
+		bIsRunning = true;
+		CurrentThread = FRunnableThread::Create(this, TEXT("Unreal DOD Simulation"));
+	}
 }
 
 FUDSimulation::~FUDSimulation()
@@ -121,13 +178,10 @@ FUDSimulation::~FUDSimulation()
 	}
 }
 
-void FUDSimulation::Start(UWorld* InWorld)
+void FUDSimulation::Tick_GameThread(const float& Delta)
 {
-	if (InWorld)
-	{
-		World = InWorld;
-		bIsRunning = true;
-	}
+	check(IsInGameThread());
+	Queue.ExecuteCommands();
 }
 
 void FUDSimulation::Stop()
@@ -140,10 +194,14 @@ void FUDSimulation::ReplicateIndex(const int32& Index, const bool& bSkipSource)
 	
 }
 
-
 TArray<int32> FUDSimulation::GetDifferences(const FUDSimulationState& ClientState, const float& ErrorTolerence)
 {
 	return TArray<int32>();
+}
+
+void FUDSimulation::EnqueueCommandToGameThread(TFunction<void(void)> LambdaToAdd)
+{
+	Queue.Enqueue(LambdaToAdd);
 }
 
 bool FUDSimulation::Init()
@@ -157,19 +215,30 @@ uint32 FUDSimulation::Run()
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Cannot run simulation with an invalid world, please set world"));
 	}
+
 	while (bIsRunning)
 	{
 		check(World);
 		const float DeltaSeconds = UGameplayStatics::GetWorldDeltaSeconds(World);
-		State.UpdateLocations(DeltaSeconds);
-		State.UpdateRotations(DeltaSeconds);
+
+		const TArray<int32> LocationIndices =  State.UpdateLocations(DeltaSeconds);
+		const TArray<int32> RotationIndices = State.UpdateRotations(DeltaSeconds);
+
+		EnqueueCommandToGameThread([&, TempDelta = DeltaSeconds, TempLocationIndices = LocationIndices, TempRotationIndices = RotationIndices]()
+		{
+			State.UpdateActorsLocations(TempLocationIndices, TempDelta);
+			State.UpdateActorsRotations(TempRotationIndices, TempDelta);
+		});
 
 		// Wait to the next frame time
-		FPlatformProcess::ConditionalSleep([TempWorld = World, TempFps = FramePerSecond]() 
-		{
-			check(TempWorld);
-			return UGameplayStatics::GetWorldDeltaSeconds(TempWorld) >= 1 / TempFps;
-		});
+		FPlatformProcess::Sleep(1.f / FramePerSecond);
+
+		//FPlatformProcess::ConditionalSleep([TempWorld = World, TempFps = FramePerSecond]() 
+		//{
+		//	check(TempWorld);
+		//	return UGameplayStatics::GetWorldDeltaSeconds(TempWorld) >= 1 / TempFps;
+		//});
 	}
+
 	return 0;
 }
