@@ -42,9 +42,10 @@ struct UNREALDOD_API FUDActor
 	AActor* Ptr = nullptr;
 	FUDSimulationQueue MovementQueue = FUDSimulationQueue();
 
-	AActor* operator->() { return Ptr; };
-	operator const bool() const { return (bool)Ptr; };
-	const bool operator==(const FUDActor& Other) const { return this->Ptr == Other.Ptr; };
+	FORCEINLINE AActor* Get() { return Ptr; };
+	FORCEINLINE AActor* operator->() { return Ptr; };
+	FORCEINLINE operator const bool() const { return (bool)Ptr; };
+	FORCEINLINE const bool operator==(const FUDActor& Other) const { return this->Ptr == Other.Ptr; };
 };
 
 struct UNREALDOD_API FUDLocation
@@ -55,9 +56,21 @@ struct UNREALDOD_API FUDLocation
 
 struct UNREALDOD_API FUDMovement
 {
-	float Acceleration = 15.f;
+	float Acceleration = 10.f;
 	float Deceleration = 0.1f;
-	float MaxSpeed = 100.f;
+	float MaxSpeed = 1000.f;
+	float Gravity = 9.8f; // Make it a vector if direction is needed
+	uint8 bEnableCollision : 1;
+
+	FUDMovement() : bEnableCollision(true) {};
+}; 
+
+struct UNREALDOD_API FUDCollision
+{
+	float Size = 50.f;
+	float Height = 0.f;
+	float AcceptableSlope = 4.f;
+	uint8 MaxSlopeIteration = 3;
 };
 
 struct UNREALDOD_API FUDRotation
@@ -74,11 +87,12 @@ struct UNREALDOD_API FUDMovementInput
 
 struct UNREALDOD_API FUDSimulationState
 {
-	TArray<FUDActor>			Actors		= {};
-	TArray<FUDMovement>			Movements	= {};
 	TArray<FUDLocation>			Locations	= {};
 	TArray<FUDRotation>			Rotations	= {};
+	TArray<FUDMovement>			Movements	= {};
 	TArray<FUDMovementInput>	Inputs		= {};
+	TArray<FUDCollision>		Collisions	= {};
+	TArray<FUDActor>			Actors = {}; // put this at the end for a better data layout
 	TArray<int32>				IndicesToReplicate = {};
 
 	int32 RegisterActor(AActor* Actor);
@@ -92,6 +106,12 @@ struct UNREALDOD_API FUDSimulationState
 	void UpdateActorsLocations(const TArray<int32>& Indices, const float& Delta);
 	void UpdateActorsRotations(const TArray<int32>& Indices, const float& Delta);
 
+	bool CheckCollision(const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, FVector& TargetPosition);
+
+	void WaitUntilUnlocked();
+
+	uint8 bLocked : 1;
+	FUDSimulationState() : bLocked(false) {};
 };
 
 
@@ -127,7 +147,6 @@ private:
 private:
 
 	FUDSimulationState State = FUDSimulationState();
-
 	FUDSimulationQueue GeneralQueue = FUDSimulationQueue();
 
 	// Threading
