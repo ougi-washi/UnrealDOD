@@ -1,4 +1,4 @@
-// Copyright - Nexus Division
+// Copyright - Jed
 
 
 #include "Game/UDGameMode.h"
