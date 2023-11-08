@@ -161,15 +161,28 @@ TArray<int32> FUDSimulationState::UpdateLocations(const float& Delta)
 			check(Actor.Get());
 
 			UWorld* World = Actor->GetWorld();
-			FVector NewLocation = CachedLocation + (Location.Velocity * Delta * 1.8f);
-			if (!CheckCollision(Actor.Get(), Collision, CachedLocation, NewLocation))
+			FVector NewLocation = CachedLocation + (Location.Velocity * Delta);
+			FVector CollidedLocation = FVector::ZeroVector;
+			FVector CollisionPos = FVector::ZeroVector;
+			if (CheckCollision(CollidedLocation, CollisionPos, Actor.Get(), Collision, CachedLocation, NewLocation))
 			{
-				Location.Value = NewLocation;
+				//Location.Value = Location.Velocity * Delta;
+				// Ensure the character doesn't move below a certain height
+				//Location.Value.Z = FMath::Max(Location.Value.Z, CollisionPos.Z /*+ Collision.Height*/);
+
+			}
+			else
+			{
+				Location.Value = CollidedLocation;
+				// Ensure the character doesn't move below a certain height (e.g., character's capsule or feet height)
+				//Location.Value.Z = FMath::Max(Location.Value.Z, Collision.Height);
 			}
 		}
 		else
 		{
 			Location.Value = Location.Velocity * Delta;
+			// Ensure the character doesn't move below a certain height
+			//Location.Value.Z = FMath::Max(Location.Value.Z, Collision.Height);
 		}
 
 		if (CachedLocation != Location.Value)
@@ -240,7 +253,7 @@ void FUDSimulationState::UpdateActorsRotations(const TArray<int32>& Indices, con
 	}
 }
 
-bool FUDSimulationState::CheckCollision(const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, FVector& TargetPosition)
+bool FUDSimulationState::CheckCollision(FVector& OutPosition, FVector& HitPos, const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, const FVector& TargetPosition)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE_STR("SimState_CheckCollision");
 	UWorld* World = Actor->GetWorld();
@@ -254,8 +267,9 @@ bool FUDSimulationState::CheckCollision(const AActor* Actor, const FUDCollision&
 	TArray<FHitResult> HitResult = {};
 
 	FVector SlideDirection = FVector::ZeroVector;
+	OutPosition = TargetPosition;
 	int32 Iterations = 0;
-	while (World->SweepMultiByChannel(HitResult, CurrentPosition, TargetPosition, FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(Collision.Size), CollisionParams))
+	while (World->SweepMultiByChannel(HitResult, CurrentPosition, OutPosition, FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(Collision.Size), CollisionParams))
 	{
 		// Find the normal of the steepest slope among the hits
 		FVector BestSlopeNormal = FVector::UpVector; // Initialize with vertical direction
@@ -264,12 +278,12 @@ bool FUDSimulationState::CheckCollision(const AActor* Actor, const FUDCollision&
 		for (const FHitResult& Hit : HitResult)
 		{
 			FVector HitNormal = Hit.ImpactNormal;
-
 			float SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(HitNormal.Z));
 			if (SlopeAngle > BestSlopeAngle)
 			{
 				BestSlopeAngle = SlopeAngle;
 				BestSlopeNormal = HitNormal;
+				HitPos = Hit.Location;
 			}
 		}
 
@@ -284,15 +298,22 @@ bool FUDSimulationState::CheckCollision(const AActor* Actor, const FUDCollision&
 			// The steepest slope is too steep, so handle the collision by sliding along the slope
 			SlideDirection = FVector::CrossProduct(BestSlopeNormal, FVector::UpVector).GetSafeNormal();
 			float SlideDistance = Collision.Size * FMath::Cos(FMath::DegreesToRadians(Collision.AcceptableSlope));
-			FVector NewTargetPosition = TargetPosition - SlideDirection * SlideDistance;
-
-			if (NewTargetPosition.Equals(TargetPosition, KINDA_SMALL_NUMBER))
+			FVector NewTargetLocationFound = OutPosition - SlideDirection * SlideDistance;
+			
+			if (NewTargetLocationFound.Equals(OutPosition, UE_KINDA_SMALL_NUMBER))
 			{
 				// The sliding operation did not result in a change; exit the loop
 				break;
 			}
 
-			TargetPosition = NewTargetPosition;
+			if (FVector::Distance(TargetPosition, NewTargetLocationFound) <= Collision.AcceptableDistance)
+			{
+				OutPosition = NewTargetLocationFound;
+			}
+			else
+			{
+				return true;
+			}
 		}
 
 		// Clear the HitResult array for the next iteration

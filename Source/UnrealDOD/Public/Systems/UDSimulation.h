@@ -37,7 +37,7 @@ protected:
 	uint8 bIsLocked : 1; // This makes sure no concurrency issues happen with the queue
 };
 
-struct UNREALDOD_API FUDActor
+struct UNREALDOD_API FUDActor	
 {
 	AActor* Ptr = nullptr;
 	FUDSimulationQueue MovementQueue = FUDSimulationQueue();
@@ -56,10 +56,10 @@ struct UNREALDOD_API FUDLocation
 
 struct UNREALDOD_API FUDMovement
 {
-	float Acceleration = 10.f;
+	float Acceleration = 1024.f;
 	float Deceleration = 0.1f;
 	float MaxSpeed = 1000.f;
-	float Gravity = 9.8f; // Make it a vector if direction is needed
+	float Gravity = 980.f; // Make it a vector if direction is needed
 	uint8 bEnableCollision : 1;
 
 	FUDMovement() : bEnableCollision(true) {};
@@ -68,9 +68,10 @@ struct UNREALDOD_API FUDMovement
 struct UNREALDOD_API FUDCollision
 {
 	float Size = 50.f;
-	float Height = 0.f;
+	float Height = 5.f;
 	float AcceptableSlope = 4.f;
-	uint8 MaxSlopeIteration = 3;
+	float AcceptableDistance = 5.f;
+	uint8 MaxSlopeIteration = 64;
 };
 
 struct UNREALDOD_API FUDRotation
@@ -106,7 +107,7 @@ struct UNREALDOD_API FUDSimulationState
 	void UpdateActorsLocations(const TArray<int32>& Indices, const float& Delta);
 	void UpdateActorsRotations(const TArray<int32>& Indices, const float& Delta);
 
-	bool CheckCollision(const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, FVector& TargetPosition);
+	bool CheckCollision(FVector& OutPosition, FVector& HitPos, const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, const FVector& TargetPosition);
 
 	void WaitUntilUnlocked();
 
