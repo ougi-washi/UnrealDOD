@@ -6,7 +6,8 @@
 #include "HAL/PlatformProcess.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
-#define MAX_QUEUE_SIZE 50000
+#define MAX_QUEUE_SIZE 5000
+#define MAX_MOVEMENT_QUEUE_SIZE 2
 #define MAX_COMMANDS_PER_FRAME 5
 
 void FUDSimulationQueue::ExecuteCommands()
@@ -27,7 +28,10 @@ void FUDSimulationQueue::ExecuteCommands()
 			Commands[CurrentCommandIndex].Lambda();
 		}
 		CurrentCommandIndex++;
-	}
+	}	
+
+	SleepUntilUnlocked();
+	Commands.RemoveAt(0, CurrentCommandIndex, true);
 
 	FinishExecution();
 }
@@ -35,10 +39,15 @@ void FUDSimulationQueue::ExecuteCommands()
 void FUDSimulationQueue::Enqueue(const FUDSimulationCommand& Command)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE_STR("SimQueue_EnqueueCommand");
-	if (Commands.Num() < MAX_QUEUE_SIZE && !IsLocked())
+	if (Commands.Num() < MAX_QUEUE_SIZE)
 	{
+		SleepUntilUnlocked();
 		Lock();
 		Commands.Insert(Command, Commands.Num());
+		if (Commands.Num() > MaxSize)
+		{
+			Commands.RemoveAt(MaxSize, Commands.Num() - MaxSize, true);
+		}
 		Unlock();
 	}
 	else
@@ -50,9 +59,16 @@ void FUDSimulationQueue::Enqueue(const FUDSimulationCommand& Command)
 void FUDSimulationQueue::Clear()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE_STR("SimQueue_Clear");
+	SleepUntilUnlocked();
 	Lock();
 	Commands.Empty();
 	Unlock();
+}
+
+void FUDSimulationQueue::SleepUntilUnlocked()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE_STR("SimQueue_SleepUntilUnlocked");
+	FPlatformProcess::ConditionalSleep([&]() {return !bLocked; }, .001f);
 }
 
 int32 FUDSimulationState::RegisterActor(AActor* Actor)
@@ -88,6 +104,7 @@ int32 FUDSimulationState::RegisterActor(AActor* Actor)
 
 	FUDMovement Movement = {};
 	const int32 MovIndex = Movements.Add(Movement);
+	Movement.Acceleration = FMath::FRandRange(1024., 1612.);
 	ensureMsgf(MovIndex == AddedIndex, TEXT("FUDSimulationState::RegisterActor - Cannot add Movement properly because the indices seem to unmatch with the actor pointer."));
 
 	FUDMovementInput Input = {};
@@ -98,6 +115,11 @@ int32 FUDSimulationState::RegisterActor(AActor* Actor)
 	FUDCollision Collision = {};
 	const int32 CollIndex = Collisions.Add(Collision);
 	ensureMsgf(CollIndex == AddedIndex, TEXT("FUDSimulationState::RegisterActor - Cannot add Collision properly because the indices seem to unmatch with the actor pointer."));
+
+	FUDSimulationQueue MovementQueue = {};
+	MovementQueue.MaxSize = MAX_MOVEMENT_QUEUE_SIZE;
+	const int32	MovQueueIndex = MovementQueues.Add(MovementQueue);
+	ensureMsgf(MovQueueIndex == AddedIndex, TEXT("FUDSimulationState::RegisterActor - Cannot add MovementQueue properly because the indices seem to unmatch with the actor pointer."));
 
 	bLocked = false;
 	return AddedIndex;
@@ -119,8 +141,8 @@ void FUDSimulationState::UnregisterActor(const int32& Index)
 
 FUDSimulationQueue& FUDSimulationState::GetActorMovementQueue(const int32& Index)
 {
-	check(Actors.IsValidIndex(Index) && Actors[Index]);
-	return Actors[Index].MovementQueue;
+	check(MovementQueues.IsValidIndex(Index));
+	return MovementQueues[Index];
 }
 
 TArray<int32> FUDSimulationState::UpdateLocations(const float& Delta)
@@ -166,16 +188,14 @@ TArray<int32> FUDSimulationState::UpdateLocations(const float& Delta)
 			FVector CollisionPos = FVector::ZeroVector;
 			if (CheckCollision(CollidedLocation, CollisionPos, Actor.Get(), Collision, CachedLocation, NewLocation))
 			{
-				//Location.Value = Location.Velocity * Delta;
-				// Ensure the character doesn't move below a certain height
-				//Location.Value.Z = FMath::Max(Location.Value.Z, CollisionPos.Z /*+ Collision.Height*/);
+				Location.Value = NewLocation;
+				// Ensure the object doesn't move below a certain height
+				Location.Value.Z = FMath::Max(Location.Value.Z, CollisionPos.Z + Collision.Height);
 
 			}
 			else
 			{
 				Location.Value = CollidedLocation;
-				// Ensure the character doesn't move below a certain height (e.g., character's capsule or feet height)
-				//Location.Value.Z = FMath::Max(Location.Value.Z, Collision.Height);
 			}
 		}
 		else
@@ -269,7 +289,7 @@ bool FUDSimulationState::CheckCollision(FVector& OutPosition, FVector& HitPos, c
 	FVector SlideDirection = FVector::ZeroVector;
 	OutPosition = TargetPosition;
 	int32 Iterations = 0;
-	while (World->SweepMultiByChannel(HitResult, CurrentPosition, OutPosition, FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(Collision.Size), CollisionParams))
+	if (World->SweepMultiByChannel(HitResult, CurrentPosition, OutPosition, FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(Collision.Size), CollisionParams))
 	{
 		// Find the normal of the steepest slope among the hits
 		FVector BestSlopeNormal = FVector::UpVector; // Initialize with vertical direction
@@ -278,43 +298,53 @@ bool FUDSimulationState::CheckCollision(FVector& OutPosition, FVector& HitPos, c
 		for (const FHitResult& Hit : HitResult)
 		{
 			FVector HitNormal = Hit.ImpactNormal;
-			float SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(HitNormal.Z));
-			if (SlopeAngle > BestSlopeAngle)
+			double HitDotProd = FVector::DotProduct(Hit.ImpactNormal, FVector(0.f, 0.f, 1.f));
+			if (HitDotProd <  .2f)
 			{
-				BestSlopeAngle = SlopeAngle;
-				BestSlopeNormal = HitNormal;
-				HitPos = Hit.Location;
-			}
-		}
-
-		// Check the slope of the steepest hit
-		if (BestSlopeAngle <= Collision.AcceptableSlope)
-		{
-			// The steepest slope is within an acceptable range, allow movement
-			return true;
-		}
-		else
-		{
-			// The steepest slope is too steep, so handle the collision by sliding along the slope
-			SlideDirection = FVector::CrossProduct(BestSlopeNormal, FVector::UpVector).GetSafeNormal();
-			float SlideDistance = Collision.Size * FMath::Cos(FMath::DegreesToRadians(Collision.AcceptableSlope));
-			FVector NewTargetLocationFound = OutPosition - SlideDirection * SlideDistance;
-			
-			if (NewTargetLocationFound.Equals(OutPosition, UE_KINDA_SMALL_NUMBER))
-			{
-				// The sliding operation did not result in a change; exit the loop
-				break;
+				//BestSlopeAngle = SlopeAngle;
+				//BestSlopeNormal = HitNormal;
+				HitPos = Hit.ImpactPoint;
 			}
 
-			if (FVector::Distance(TargetPosition, NewTargetLocationFound) <= Collision.AcceptableDistance)
-			{
-				OutPosition = NewTargetLocationFound;
-			}
-			else
-			{
-				return true;
-			}
+			//float SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(HitNormal.Z));
+			//if (SlopeAngle > BestSlopeAngle)
+			//{
+			//	BestSlopeAngle = SlopeAngle;
+			//	BestSlopeNormal = HitNormal;
+			//	HitPos = Hit.ImpactPoint;
+			//}
+
 		}
+
+		return true;
+		//// Check the slope of the steepest hit
+		//if (BestSlopeAngle <= Collision.AcceptableSlope)
+		//{
+		//	// The steepest slope is within an acceptable range, allow movement
+		//	return true;
+		//}
+		//else
+		//{
+		//	// The steepest slope is too steep, so handle the collision by sliding along the slope
+		//	SlideDirection = FVector::CrossProduct(BestSlopeNormal, FVector::UpVector).GetSafeNormal();
+		//	float SlideDistance = Collision.Size * FMath::Cos(FMath::DegreesToRadians(Collision.AcceptableSlope));
+		//	FVector NewTargetLocationFound = OutPosition - SlideDirection * SlideDistance;
+		//	
+		//	if (NewTargetLocationFound.Equals(OutPosition, UE_KINDA_SMALL_NUMBER))
+		//	{
+		//		// The sliding operation did not result in a change; exit the loop
+		//		break;
+		//	}
+
+		//	if (FVector::Distance(TargetPosition, NewTargetLocationFound) <= Collision.AcceptableDistance)
+		//	{
+		//		OutPosition = NewTargetLocationFound;
+		//	}
+		//	else
+		//	{
+		//		return true;
+		//	}
+		//}
 
 		// Clear the HitResult array for the next iteration
 		HitResult.Empty();
@@ -389,16 +419,15 @@ uint32 FUDSimulation::Run()
 		for (const int32& IndexToUpdate : IndicesToUpdate)
 		{
 			FUDSimulationQueue& CurrentQueue = State.GetActorMovementQueue(IndexToUpdate);
-
 			if (CurrentQueue.DoneExecuting()) // Refresh if possible
 			{
 				CurrentQueue.Clear();
-				EnqueueCommandToGameThread(CurrentQueue, FMath::RandHelper(1),
-					[&, TempDelta = DeltaSeconds, TempIndexToUpdate = IndexToUpdate]()
-					{
-						State.UpdateActorLocation(TempIndexToUpdate, TempDelta);
-						State.UpdateActorRotation(TempIndexToUpdate, TempDelta);
-					});
+				EnqueueCommandToGameThread(CurrentQueue, FMath::RandHelper(2),
+				[&, TempDelta = DeltaSeconds, TempIndexToUpdate = IndexToUpdate]()
+				{
+					State.UpdateActorLocation(TempIndexToUpdate, TempDelta);
+					State.UpdateActorRotation(TempIndexToUpdate, TempDelta);
+				});
 				CurrentQueue.WaitForExecution();
 			}
 		}

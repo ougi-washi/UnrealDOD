@@ -16,16 +16,18 @@ struct UNREALDOD_API FUDSimulationCommand
 struct UNREALDOD_API FUDSimulationQueue
 {
 	TArray<FUDSimulationCommand> Commands = {};
-	
-	FUDSimulationQueue() : bFinishedExecution(false), bIsLocked(false) {};
+	int32 MaxSize = 3;
+
+	FUDSimulationQueue() : bFinishedExecution(false), bLocked(false) {};
 
 	void ExecuteCommands();
 	void Enqueue(const FUDSimulationCommand& Command);
 	void Clear();
 
-	bool IsLocked() const { return bIsLocked; };					// Simulation thread
-	void Lock() { check(!IsInGameThread()); bIsLocked = true; };	// Simulation thread
-	void Unlock() { check(!IsInGameThread()); bIsLocked = false; };	// Simulation thread
+	bool IsLocked() const { return bLocked; };					// Simulation thread
+	void Lock() { check(!IsInGameThread()); bLocked = true; };	// Simulation thread
+	void Unlock() { check(!IsInGameThread()); bLocked = false; };	// Simulation thread
+	void SleepUntilUnlocked();
 
 	bool DoneExecuting() const { return bFinishedExecution; };		// Game thread
 	void FinishExecution() { bFinishedExecution = true; };			// Game thread
@@ -34,13 +36,12 @@ struct UNREALDOD_API FUDSimulationQueue
 protected:
 
 	uint8 bFinishedExecution : 1;
-	uint8 bIsLocked : 1; // This makes sure no concurrency issues happen with the queue
+	uint8 bLocked : 1; // This makes sure no concurrency issues happen with the queue
 };
 
 struct UNREALDOD_API FUDActor	
 {
 	AActor* Ptr = nullptr;
-	FUDSimulationQueue MovementQueue = FUDSimulationQueue();
 
 	FORCEINLINE AActor* Get() { return Ptr; };
 	FORCEINLINE AActor* operator->() { return Ptr; };
@@ -71,7 +72,7 @@ struct UNREALDOD_API FUDCollision
 	float Height = 5.f;
 	float AcceptableSlope = 4.f;
 	float AcceptableDistance = 5.f;
-	uint8 MaxSlopeIteration = 64;
+	uint8 MaxSlopeIteration = 10;
 };
 
 struct UNREALDOD_API FUDRotation
@@ -88,12 +89,14 @@ struct UNREALDOD_API FUDMovementInput
 
 struct UNREALDOD_API FUDSimulationState
 {
-	TArray<FUDLocation>			Locations	= {};
-	TArray<FUDRotation>			Rotations	= {};
-	TArray<FUDMovement>			Movements	= {};
-	TArray<FUDMovementInput>	Inputs		= {};
-	TArray<FUDCollision>		Collisions	= {};
-	TArray<FUDActor>			Actors = {}; // put this at the end for a better data layout
+	TArray<FUDLocation>			Locations		= {};
+	TArray<FUDRotation>			Rotations		= {};
+	TArray<FUDMovement>			Movements		= {};
+	TArray<FUDMovementInput>	Inputs			= {};
+	TArray<FUDCollision>		Collisions		= {};
+	TArray<FUDActor>			Actors			= {};
+	TArray<FUDSimulationQueue>	MovementQueues	= {};
+	// put this at the end for a better data layout
 	TArray<int32>				IndicesToReplicate = {};
 
 	int32 RegisterActor(AActor* Actor);
