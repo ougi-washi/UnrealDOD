@@ -110,8 +110,8 @@ struct UNREALDOD_API FUDSimulationState
 	void UpdateActorsLocations(const TArray<int32>& Indices, const float& Delta);
 	void UpdateActorsRotations(const TArray<int32>& Indices, const float& Delta);
 
-	bool CheckCollision(FVector& OutPosition, FVector& HitPos, const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, const FVector& TargetPosition);
-
+	bool CheckCollision(FVector& OutPosition, const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, const FVector& TargetPosition);
+	bool CanMove(const AActor* Actor, const FVector& CurrentPosition, const FVector& TargetPosition, FVector& OutPos);
 	void WaitUntilUnlocked();
 
 	uint8 bLocked : 1;
@@ -141,8 +141,6 @@ public:
 	void ReplicateIndex(const int32& Index, const bool& bSkipSource);
 	TArray<int32> GetDifferences(const FUDSimulationState& ClientState, const float& ErrorTolerence); // Returns the list of indices that have to be corrected
 
-	void EnqueueCommandToGameThread(FUDSimulationQueue& Queue, const int64 FrameDelay, TFunction<void(void)> LambdaToAdd);
-	void EnqueueGeneralCommandToGameThread(TFunction<void(void)> LambdaToAdd);
 	
 private:
 
@@ -151,7 +149,6 @@ private:
 private:
 
 	FUDSimulationState State = FUDSimulationState();
-	FUDSimulationQueue GeneralQueue = FUDSimulationQueue();
 
 	// Threading
 	FRunnableThread* CurrentThread = nullptr;
@@ -161,3 +158,11 @@ private:
 	// Context
 	UWorld* World = nullptr;
 };
+
+namespace UD
+{
+	static FUDSimulationQueue GeneralQueue = FUDSimulationQueue();
+
+	void EnqueueCommandToGameThread(FUDSimulationQueue& Queue, const int64 FrameDelay, TFunction<void(void)> LambdaToAdd);
+	void EnqueueGeneralCommandToGameThread(TFunction<void(void)> LambdaToAdd);
+}

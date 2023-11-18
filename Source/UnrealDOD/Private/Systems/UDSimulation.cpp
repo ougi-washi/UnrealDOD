@@ -5,9 +5,10 @@
 #include "Kismet/GameplayStatics.h"
 #include "HAL/PlatformProcess.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "DrawDebugHelpers.h"
 
 #define MAX_QUEUE_SIZE 5000
-#define MAX_MOVEMENT_QUEUE_SIZE 2
+#define MAX_MOVEMENT_QUEUE_SIZE 3
 #define MAX_COMMANDS_PER_FRAME 5
 
 void FUDSimulationQueue::ExecuteCommands()
@@ -186,16 +187,10 @@ TArray<int32> FUDSimulationState::UpdateLocations(const float& Delta)
 			FVector NewLocation = CachedLocation + (Location.Velocity * Delta);
 			FVector CollidedLocation = FVector::ZeroVector;
 			FVector CollisionPos = FVector::ZeroVector;
-			if (CheckCollision(CollidedLocation, CollisionPos, Actor.Get(), Collision, CachedLocation, NewLocation))
-			{
-				Location.Value = NewLocation;
-				// Ensure the object doesn't move below a certain height
-				Location.Value.Z = FMath::Max(Location.Value.Z, CollisionPos.Z + Collision.Height);
 
-			}
-			else
+			if (CheckCollision(CollidedLocation, Actor.Get(), Collision, CachedLocation, NewLocation))
 			{
-				Location.Value = CollidedLocation;
+				// TODO : move collided point to half the size of the object and move it there
 			}
 		}
 		else
@@ -245,7 +240,7 @@ void FUDSimulationState::UpdateActorLocation(const int32& Index, const float& De
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE_STR("SimState_UpdateLocation");
 	check(Actors.IsValidIndex(Index) && Actors[Index]);
-	Actors[Index]->SetActorLocation(Locations[Index].Value);
+	Actors[Index]->SetActorLocation(Locations[Index].Value, true);
 }
 
 void FUDSimulationState::UpdateActorRotation(const int32& Index, const float& Delta)
@@ -273,7 +268,7 @@ void FUDSimulationState::UpdateActorsRotations(const TArray<int32>& Indices, con
 	}
 }
 
-bool FUDSimulationState::CheckCollision(FVector& OutPosition, FVector& HitPos, const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, const FVector& TargetPosition)
+bool FUDSimulationState::CheckCollision(FVector& OutPosition, const AActor* Actor, const FUDCollision& Collision, const FVector& CurrentPosition, const FVector& TargetPosition)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE_STR("SimState_CheckCollision");
 	UWorld* World = Actor->GetWorld();
@@ -286,83 +281,85 @@ bool FUDSimulationState::CheckCollision(FVector& OutPosition, FVector& HitPos, c
 	CollisionParams.AddIgnoredActor(Actor);
 	TArray<FHitResult> HitResult = {};
 
-	FVector SlideDirection = FVector::ZeroVector;
 	OutPosition = TargetPosition;
 	int32 Iterations = 0;
 	if (World->SweepMultiByChannel(HitResult, CurrentPosition, OutPosition, FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(Collision.Size), CollisionParams))
 	{
-		// Find the normal of the steepest slope among the hits
-		FVector BestSlopeNormal = FVector::UpVector; // Initialize with vertical direction
-		float BestSlopeAngle = 0.0f;
-
-		for (const FHitResult& Hit : HitResult)
-		{
-			FVector HitNormal = Hit.ImpactNormal;
-			double HitDotProd = FVector::DotProduct(Hit.ImpactNormal, FVector(0.f, 0.f, 1.f));
-			if (HitDotProd <  .2f)
-			{
-				//BestSlopeAngle = SlopeAngle;
-				//BestSlopeNormal = HitNormal;
-				HitPos = Hit.ImpactPoint;
-			}
-
-			//float SlopeAngle = FMath::RadiansToDegrees(FMath::Acos(HitNormal.Z));
-			//if (SlopeAngle > BestSlopeAngle)
-			//{
-			//	BestSlopeAngle = SlopeAngle;
-			//	BestSlopeNormal = HitNormal;
-			//	HitPos = Hit.ImpactPoint;
-			//}
-
-		}
-
+		OutPosition = HitResult[0].ImpactPoint;
 		return true;
-		//// Check the slope of the steepest hit
-		//if (BestSlopeAngle <= Collision.AcceptableSlope)
-		//{
-		//	// The steepest slope is within an acceptable range, allow movement
-		//	return true;
-		//}
-		//else
-		//{
-		//	// The steepest slope is too steep, so handle the collision by sliding along the slope
-		//	SlideDirection = FVector::CrossProduct(BestSlopeNormal, FVector::UpVector).GetSafeNormal();
-		//	float SlideDistance = Collision.Size * FMath::Cos(FMath::DegreesToRadians(Collision.AcceptableSlope));
-		//	FVector NewTargetLocationFound = OutPosition - SlideDirection * SlideDistance;
-		//	
-		//	if (NewTargetLocationFound.Equals(OutPosition, UE_KINDA_SMALL_NUMBER))
-		//	{
-		//		// The sliding operation did not result in a change; exit the loop
-		//		break;
-		//	}
-
-		//	if (FVector::Distance(TargetPosition, NewTargetLocationFound) <= Collision.AcceptableDistance)
-		//	{
-		//		OutPosition = NewTargetLocationFound;
-		//	}
-		//	else
-		//	{
-		//		return true;
-		//	}
-		//}
-
-		// Clear the HitResult array for the next iteration
-		HitResult.Empty();
-
-		Iterations++;
-		if (Iterations >= Collision.MaxSlopeIteration)
-		{
-			return false; // Reached the maximum number of iterations
-		}
 	}
 
 	return false; // No collisions
 }
 
+bool FUDSimulationState::CanMove(const AActor* Actor, const FVector& CurrentPosition, const FVector& TargetPosition, FVector& OutPos)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE_STR("SimState_CheckGroundCollision");
+	UWorld* World = Actor->GetWorld();
+	if (!World)
+	{
+		return false; // No valid world reference
+	}
+
+	FCollisionQueryParams CollisionParams = {};
+	CollisionParams.AddIgnoredActor(Actor);
+	FHitResult HitResult = {};
+	if (World->LineTraceSingleByChannel(HitResult, CurrentPosition, TargetPosition, ECC_WorldStatic, CollisionParams))
+	{
+
+		// Find the normal of the steepest slope among the hits
+		FVector BestSlopeNormal = FVector::UpVector; // Initialize with vertical direction
+		float BestSlopeAngle = 0.0f;
+
+
+
+		if (FVector(0., 0., 1.).Dot(HitResult.ImpactNormal) < .4)
+		{
+			UD::EnqueueGeneralCommandToGameThread([TempWorld = World, TempHit = HitResult]()
+			{
+				DrawDebugLine(TempWorld, TempHit.ImpactPoint, TempHit.ImpactPoint * FVector(TempHit.ImpactNormal).Normalize() * 10.f, FColor::Red, true, 0.01f);
+			});
+			OutPos = HitResult.ImpactPoint;
+			return true;
+		}
+	}
+
+	return false;
+	//// Check the slope of the steepest hit
+	//if (BestSlopeAngle <= Collision.AcceptableSlope)
+	//{
+	//	// The steepest slope is within an acceptable range, allow movement
+	//	return true;
+	//}
+	//else
+	//{
+	//	// The steepest slope is too steep, so handle the collision by sliding along the slope
+	//	SlideDirection = FVector::CrossProduct(BestSlopeNormal, FVector::UpVector).GetSafeNormal();
+	//	float SlideDistance = Collision.Size * FMath::Cos(FMath::DegreesToRadians(Collision.AcceptableSlope));
+	//	FVector NewTargetLocationFound = OutPosition - SlideDirection * SlideDistance;
+	//	
+	//	if (NewTargetLocationFound.Equals(OutPosition, UE_KINDA_SMALL_NUMBER))
+	//	{
+	//		// The sliding operation did not result in a change; exit the loop
+	//		break;
+	//	}
+
+	//	if (FVector::Distance(TargetPosition, NewTargetLocationFound) <= Collision.AcceptableDistance)
+	//	{
+	//		OutPosition = NewTargetLocationFound;
+	//	}
+	//	else
+	//	{
+	//		return true;
+	//	}
+	//}
+
+}
+
 void FUDSimulationState::WaitUntilUnlocked()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE_STR("SimState_WaitUntilUnlocked");
-	FPlatformProcess::ConditionalSleep([&]() {return !bLocked; }, .001f);
+	FPlatformProcess::ConditionalSleep([&]() {return !bLocked; }, .0001f);
 }
 
 FUDSimulation::FUDSimulation(UWorld* InWorld)
@@ -422,13 +419,12 @@ uint32 FUDSimulation::Run()
 			if (CurrentQueue.DoneExecuting()) // Refresh if possible
 			{
 				CurrentQueue.Clear();
-				EnqueueCommandToGameThread(CurrentQueue, FMath::RandHelper(2),
+				UD::EnqueueCommandToGameThread(CurrentQueue, FMath::RandHelper(2),
 				[&, TempDelta = DeltaSeconds, TempIndexToUpdate = IndexToUpdate]()
 				{
 					State.UpdateActorLocation(TempIndexToUpdate, TempDelta);
 					State.UpdateActorRotation(TempIndexToUpdate, TempDelta);
 				});
-				CurrentQueue.WaitForExecution();
 			}
 		}
 		State.bLocked = false;
@@ -453,7 +449,7 @@ void FUDSimulation::Stop()
 void FUDSimulation::Tick_GameThread(const float& Delta)
 {
 	check(IsInGameThread());
-	GeneralQueue.ExecuteCommands();
+	UD::GeneralQueue.ExecuteCommands();
 	for (int32 i = 0 ; i < State.Actors.Num(); i++)
 	{
 		State.GetActorMovementQueue(i).ExecuteCommands();
@@ -462,7 +458,6 @@ void FUDSimulation::Tick_GameThread(const float& Delta)
 
 void FUDSimulation::ReplicateIndex(const int32& Index, const bool& bSkipSource)
 {
-	
 }
 
 TArray<int32> FUDSimulation::GetDifferences(const FUDSimulationState& ClientState, const float& ErrorTolerence)
@@ -470,16 +465,17 @@ TArray<int32> FUDSimulation::GetDifferences(const FUDSimulationState& ClientStat
 	return TArray<int32>();
 }
 
-void FUDSimulation::EnqueueCommandToGameThread(FUDSimulationQueue& Queue, const int64 FrameDelay, TFunction<void(void)> LambdaToAdd)
+void UD::EnqueueCommandToGameThread(FUDSimulationQueue& Queue, const int64 FrameDelay, TFunction<void(void)> LambdaToAdd)
 {
 	FUDSimulationCommand Command = {};
 	Command.Lambda = LambdaToAdd;
 	Command.EnqueuedFrame = UKismetSystemLibrary::GetFrameCount();
 	Command.FrameDelay = FrameDelay;
 	Queue.Enqueue(Command);
+	Queue.WaitForExecution();
 }
 
-void FUDSimulation::EnqueueGeneralCommandToGameThread(TFunction<void(void)> LambdaToAdd)
+void UD::EnqueueGeneralCommandToGameThread(TFunction<void(void)> LambdaToAdd)
 {
-	EnqueueCommandToGameThread(GeneralQueue, 0, LambdaToAdd);
+	EnqueueCommandToGameThread(UD::GeneralQueue, 0, LambdaToAdd);
 }
